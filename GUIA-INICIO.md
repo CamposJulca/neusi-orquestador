@@ -1,132 +1,212 @@
-# Guía de inicio — Orquestador Neusi
+# Guía de inicio — Orquestador Neusi (paso a paso)
 
-Guía paso a paso para **clonar y usar el orquestador** (`neusi`) desde **Windows** o
-**Linux**. Si solo quieres operar los nodos (conectarte por SSH, ver estado, subir/bajar
-archivos), te basta el **cliente CLI**. El backend + dashboard web es opcional y se
-explica al final.
+Esta guía te lleva de **cero a funcionando**. Antes de cualquier comando, lee el
+[paso 0](#paso-0-define-tu-rol): según tu rol haces **una** de las dos rutas.
 
 ---
 
-## Índice
+## Paso 0: Define tu rol
 
-- [0. ¿Qué voy a instalar?](#0-qué-voy-a-instalar)
-- [1. Requisitos comunes](#1-requisitos-comunes)
-- [2. Clonar el repositorio](#2-clonar-el-repositorio)
-- [3. Usar el CLI en Windows (PowerShell)](#3-usar-el-cli-en-windows-powershell)
-- [4. Usar el CLI en Linux (bash)](#4-usar-el-cli-en-linux-bash)
-- [5. Apuntar al backend (importante)](#5-apuntar-al-backend-importante)
-- [6. El menú paso a paso](#6-el-menú-paso-a-paso)
-- [7. (Opcional) Levantar backend + dashboard](#7-opcional-levantar-backend--dashboard)
-- [8. Solución de problemas](#8-solución-de-problemas)
+El proyecto tiene **dos partes**. Tienes que decidir cuál vas a montar en ESTA máquina:
 
----
+| Si quieres… | Tu rol | Qué levantas | Sistema recomendado | Ve a |
+|-------------|--------|--------------|---------------------|------|
+| El servidor web + la base de datos que conoce los nodos | **CENTRAL** | Backend + dashboard (Docker) | **Linux** | [Ruta A](#ruta-a-levantar-la-central-back--dashboard) |
+| Solo conectarte/operar los nodos desde tu equipo | **CLIENTE** | Nada — solo usas el CLI `neusi` | Windows o Linux | [Ruta B](#ruta-b-usar-el-cli-cliente) |
 
-## 0. ¿Qué voy a instalar?
+> **Regla simple:** la CENTRAL se levanta **una sola vez** en una máquina (la que tiene
+> Docker y la llave SSH a todos los nodos). Todos los demás son CLIENTES que apuntan a esa
+> central. Si solo abriste tu Windows para conectarte a los servidores → eres **CLIENTE**,
+> ve directo a la [Ruta B](#ruta-b-usar-el-cli-cliente).
 
-El proyecto tiene **dos piezas independientes**:
+Ambas rutas empiezan clonando el repo (si aún no lo hiciste):
 
-| Pieza | Para qué | ¿La necesito? |
-|-------|----------|---------------|
-| **CLI `neusi`** | Conectarte por SSH a los nodos, ver estado, subir/descargar archivos, refrescar puertos | **Sí** — es el orquestador |
-| **Backend + dashboard** (Docker) | Vista web del estado y fuente de verdad de `host:puerto` | Opcional; suele correr en una sola máquina (la "central") |
-
-> El CLI funciona aunque no tengas el backend al lado: en ese caso le indicas la URL
-> del backend que corre en otra máquina (ver [paso 5](#5-apuntar-al-backend-importante)).
-
----
-
-## 1. Requisitos comunes
-
-En **cualquier** sistema necesitas:
-
-1. **Git** — para clonar el repo.
-2. **Cliente SSH** (`ssh` y `scp`) — para conectarte a los nodos.
-3. **Tu llave privada SSH** (la misma autorizada en los nodos), en la carpeta `.ssh` de tu usuario:
-   - Linux/macOS: `~/.ssh/id_ed25519`
-   - Windows: `C:\Users\TuUsuario\.ssh\id_ed25519`
-
-La instalación concreta de cada uno está en los pasos por sistema (3 y 4).
-
----
-
-## 2. Clonar el repositorio
-
-**Windows (PowerShell):**
-```powershell
-cd $env:USERPROFILE
-git clone https://github.com/CamposJulca/neusi-orquestador.git
-cd neusi-orquestador
-```
-
-**Linux/macOS (bash):**
 ```bash
-cd ~
 git clone https://github.com/CamposJulca/neusi-orquestador.git
 cd neusi-orquestador
 ```
 
 ---
 
-## 3. Usar el CLI en Windows (PowerShell)
+## Ruta A: Levantar la CENTRAL (backend + dashboard)
 
-### 3.1 Instalar requisitos
+> Esto es lo que llamas "levantar el proyecto": deja corriendo la API (`:8070`) y el
+> dashboard web (`:8080`). **Recomendado en Linux** (el `docker-compose.yml` monta `~/.ssh`
+> y usa la red del host). En Windows requiere ajustes; si tu central es Windows, avísame.
 
-**Git** (si `git --version` falla):
-```powershell
-winget install Git.Git
+### A.1 — Instalar Docker
+
+```bash
+docker --version
+docker compose version
 ```
-(cierra y reabre PowerShell tras instalar)
+- Si ambos responden una versión → sigue.
+- Si no: instala Docker. En Debian/Ubuntu: `sudo apt install -y docker.io docker-compose-plugin`
+  y luego `sudo usermod -aG docker $USER` (cierra y reabre sesión).
 
-**Cliente OpenSSH** (si `ssh -V` falla) — PowerShell **como Administrador**:
-```powershell
-Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0
+### A.2 — Crear el archivo de configuración `backend/.env`
+
+El repo **no** trae el `.env` (tiene secretos). Créalo a partir del ejemplo:
+
+```bash
+cp backend/.env.example backend/.env
 ```
 
-**Llave SSH** — copia tu `id_ed25519` a `C:\Users\TuUsuario\.ssh\` y ajusta permisos:
+Ahora **edita `backend/.env`** y revisa/añade estas claves:
+
+```env
+USE_MOCK_DATA=false
+SSH_ENABLED=true
+SSH_USERNAME=desarrollo               # usuario SSH por defecto de los nodos
+SSH_PRIVATE_KEY_PATH=/root/.ssh/id_ed25519   # ruta DENTRO del contenedor (no la cambies)
+SSH_TIMEOUT_SECONDS=5
+SSH_FALLBACK_TO_MOCK=false
+
+# >>> AÑADE esta línea (no viene en el .example y es OBLIGATORIA) <<<
+REGISTER_TOKEN=pega-aqui-un-token-secreto
+```
+
+Genera un token seguro para `REGISTER_TOKEN`:
+```bash
+openssl rand -hex 24
+```
+Copia el resultado en `REGISTER_TOKEN=`. **Apunta ese token**: los nodos (agentes) y el
+comando `neusi-refresh` deben usar exactamente el mismo.
+
+### A.3 — Tener la llave SSH lista
+
+El backend se conecta a los nodos por **llave** (no password). Debe existir tu llave
+privada en `~/.ssh/id_ed25519` (el `docker-compose.yml` la monta dentro del contenedor):
+```bash
+ls -l ~/.ssh/id_ed25519
+```
+Si no está, copia ahí la llave autorizada en los nodos y dale permisos:
+`chmod 600 ~/.ssh/id_ed25519`.
+
+### A.4 — Levantar 🚀
+
+Con el script de arranque (la forma fácil):
+```bash
+chmod +x monitor.sh
+./monitor.sh up
+```
+…o directamente con Docker:
+```bash
+docker compose up -d --build
+```
+
+**Qué debe salir:** al terminar verás
+```
+Frontend: http://localhost:8080
+Backend:  http://localhost:8070
+```
+
+### A.5 — Verificar que quedó arriba
+
+```bash
+./monitor.sh status     # los contenedores deben decir "Up"
+curl http://localhost:8070/health   # debe responder algo tipo {"status":"ok"}
+```
+Y abre en el navegador: **http://localhost:8080** → deberías ver el dashboard.
+
+### A.6 — Comandos del día a día
+
+```bash
+./monitor.sh logs      # ver logs en vivo (Ctrl+C para salir)
+./monitor.sh status    # estado de los contenedores
+./monitor.sh down      # apagar todo
+./monitor.sh rebuild   # reconstruir tras cambios
+```
+
+> Si la central NO está en `localhost` para tus clientes (otra máquina), comparte su
+> dirección: `http://IP-DE-LA-CENTRAL:8070` (backend) y `:8080` (dashboard). Los nodos y
+> clientes deben poder alcanzar esa IP/puerto.
+
+Una vez arriba la central, en tu equipo de trabajo usa el CLI → [Ruta B](#ruta-b-usar-el-cli-cliente).
+
+---
+
+## Ruta B: Usar el CLI (CLIENTE)
+
+Aquí **no levantas nada**: el CLI `neusi` se conecta por SSH a los nodos y lee el estado
+desde la central. Elige tu sistema.
+
+### B-Windows (PowerShell o CMD)
+
+#### B.1 — Instalar el cliente SSH
+
+Abre **PowerShell** y prueba:
+```powershell
+ssh -V
+```
+- Responde versión → sigue.
+- Falla → abre **PowerShell como Administrador** y corre:
+  ```powershell
+  Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0
+  ```
+
+#### B.2 — Colocar tu llave SSH
+
+Tu llave privada debe estar en `C:\Users\TuUsuario\.ssh\id_ed25519`. Verifica:
+```powershell
+dir $env:USERPROFILE\.ssh
+```
+Si no está, cópiala ahí (la misma autorizada en los nodos) y ajusta permisos:
 ```powershell
 icacls "$env:USERPROFILE\.ssh\id_ed25519" /inheritance:r /grant:r "$($env:USERNAME):(R)"
 ```
 
-### 3.2 Ejecutar el orquestador
+#### B.3 — Entrar a la carpeta del CLI
 
-Desde la carpeta del repo:
 ```powershell
 cd $env:USERPROFILE\neusi-orquestador\cli
+```
+(verifica con `dir` que ves `neusi.ps1`)
+
+#### B.4 — (Solo si la central NO está en esta PC) indicar su URL
+
+```powershell
+$env:NEUSI_MONITOR_URL   = "http://IP-DE-LA-CENTRAL:8070"
+$env:NEUSI_DASHBOARD_URL = "http://IP-DE-LA-CENTRAL:8080"
+```
+Si no lo sabes, sáltalo: arrancará en modo `fallback local`.
+
+#### B.5 — Ejecutar 🚀
+
+```powershell
 powershell -ExecutionPolicy Bypass -File .\neusi.ps1
 ```
 
-### 3.3 (Opcional) Comando `neusi` desde cualquier carpeta
+> **¿Abriste CMD en vez de PowerShell?** Funciona igual; desde CMD el paso 4 es
+> `set NEUSI_MONITOR_URL=http://IP:8070` y el arranque es exactamente el mismo comando
+> `powershell -ExecutionPolicy Bypass -File neusi.ps1`.
+
+#### B.6 — (Opcional) atajo `neusi`
 
 ```powershell
 notepad $PROFILE
 ```
-Agrega esta línea, guarda y reabre PowerShell:
+Pega y guarda; reabre PowerShell:
 ```powershell
 function neusi { & "$env:USERPROFILE\neusi-orquestador\cli\neusi.ps1" }
 ```
-Ahora basta con escribir:
-```powershell
-neusi
-```
-
-> **No necesitas** WSL, bash ni Python: `neusi.ps1` es un puerto nativo a PowerShell.
+Luego basta escribir `neusi`.
 
 ---
 
-## 4. Usar el CLI en Linux (bash)
+### B-Linux (bash)
 
-### 4.1 Instalar requisitos
+#### B.1 — Instalar dependencias (si faltan)
 
-Casi siempre ya están. Si no:
 ```bash
 # Debian/Ubuntu
 sudo apt install -y git openssh-client python3 curl
 # Arch/Manjaro
 sudo pacman -S --needed git openssh python curl
 ```
-Copia tu llave a `~/.ssh/id_ed25519` y dale permisos: `chmod 600 ~/.ssh/id_ed25519`.
+Llave en `~/.ssh/id_ed25519` con permisos `chmod 600 ~/.ssh/id_ed25519`.
 
-### 4.2 Instalar los comandos
+#### B.2 — Instalar los comandos (symlinks)
 
 Desde la raíz del repo:
 ```bash
@@ -134,13 +214,17 @@ chmod +x cli/neusi cli/neusi-refresh
 mkdir -p ~/.local/bin
 ln -sf "$PWD/cli/neusi"         ~/.local/bin/neusi
 ln -sf "$PWD/cli/neusi-refresh" ~/.local/bin/neusi-refresh
-```
-Asegúrate de que `~/.local/bin` esté en tu `PATH` (en bash):
-```bash
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
 ```
 
-### 4.3 Ejecutar
+#### B.3 — (Solo si la central NO está aquí) indicar su URL
+
+```bash
+export NEUSI_MONITOR_URL="http://IP-DE-LA-CENTRAL:8070"
+export NEUSI_DASHBOARD_URL="http://IP-DE-LA-CENTRAL:8080"
+```
+
+#### B.4 — Ejecutar 🚀
 
 ```bash
 neusi
@@ -148,104 +232,42 @@ neusi
 
 ---
 
-## 5. Apuntar al backend (importante)
-
-El menú lee los puertos reales de los nodos desde el **backend del monitor**
-(`GET /api/servers`). Por defecto busca `http://localhost:8070`.
-
-- **Si el backend corre en ESTA máquina:** no hagas nada, ya funciona.
-- **Si el backend corre en OTRA máquina** (lo normal para un cliente): indícale la URL
-  **antes** de lanzar el menú.
-
-**Windows (PowerShell):**
-```powershell
-$env:NEUSI_MONITOR_URL   = "http://IP-DEL-BACKEND:8070"
-$env:NEUSI_DASHBOARD_URL = "http://IP-DEL-BACKEND:8080"
-.\neusi.ps1
-```
-
-**Linux (bash):**
-```bash
-export NEUSI_MONITOR_URL="http://IP-DEL-BACKEND:8070"
-export NEUSI_DASHBOARD_URL="http://IP-DEL-BACKEND:8080"
-neusi
-```
-
-Cómo saber si funcionó: en la cabecera del menú,
-- **`backend en vivo`** = está leyendo datos frescos. ✅
-- **`fallback local`** = no alcanzó el backend y usa una tabla fija (puede estar
-  desactualizada). Revisa la URL y que el backend esté arriba.
-
----
-
-## 6. El menú paso a paso
-
-Al ejecutar `neusi` verás:
+## El menú (igual en Windows y Linux)
 
 ```
-1..6  Conectar por SSH a un nodo (produccion, desarrollo, pruebas, simulador1, camposjulca, cristhiamdaniel)
-7     Ver infraestructura  (estado ONLINE/OFFLINE de los 6 nodos)
-8     Refrescar puertos    (actualiza en el backend los puertos ngrok actuales)
+1..6  Conectar por SSH a un nodo
+7     Ver infraestructura (ONLINE/OFFLINE de los 6 nodos)
+8     Refrescar puertos (sincroniza los puertos ngrok con la central)
 9     Abrir dashboard web
-10    Subir archivo a una maquina      (scp)
+10    Subir archivo a una maquina (scp)
 11    Descargar archivo de una maquina (scp)
 0     Salir
 ```
 
-- **Conectar (1–6):** abre una sesión SSH interactiva al nodo. Sales con `exit`.
-  La primera vez te pedirá aceptar la huella del host (`yes`).
-- **Subir/descargar (10/11):** te pide la máquina y las rutas de origen/destino.
-- **Refrescar (8):** sincroniza los puertos ngrok con el backend. Requiere el
-  `REGISTER_TOKEN` (ver nota abajo) y normalmente se ejecuta desde la máquina central.
+Mira la **cabecera** del menú:
+- **`backend en vivo`** → está leyendo datos frescos de la central. ✅
+- **`fallback local`** → no alcanzó la central; usa una tabla fija (puede estar
+  desactualizada). Revisa la URL del paso "indicar su URL".
 
-> **Sobre el `REGISTER_TOKEN`:** la opción 8 / `neusi-refresh` necesita ese token, que
-> vive en `backend/.env`. Ese archivo **no está en el repositorio** por seguridad. Si vas
-> a refrescar desde un cliente, defínelo antes:
-> ```powershell
-> $env:REGISTER_TOKEN = "el-token-real"     # Windows
-> ```
-> ```bash
-> export REGISTER_TOKEN="el-token-real"     # Linux
-> ```
+> La opción **8 (refrescar)** necesita el `REGISTER_TOKEN` (el del `backend/.env`).
+> Normalmente se ejecuta en la central. Para hacerlo desde un cliente, define el token antes:
+> Windows `($env:REGISTER_TOKEN="...")`, Linux `export REGISTER_TOKEN=...`.
 
 ---
 
-## 7. (Opcional) Levantar backend + dashboard
+## Solución de problemas
 
-Solo en la máquina que hará de central. Requiere **Docker**.
-
-**Linux:**
-```bash
-cd neusi-orquestador
-cp backend/.env.example backend/.env   # y edita REGISTER_TOKEN y demás valores
-docker compose up -d --build
-```
-- Dashboard: `http://localhost:8080`
-- Backend (API): `http://localhost:8070`
-
-**Windows:** instala **Docker Desktop**, abre PowerShell en la carpeta del repo y corre
-los mismos comandos (`docker compose up -d --build`). Nota: el `docker-compose.yml` monta
-`~/.ssh` y usa `network_mode: host`, pensado para Linux; en Windows puede requerir ajustes
-(montar la ruta de la llave y mapear puertos). Para Windows lo recomendado es usar solo el
-**cliente CLI** y apuntar al backend de la máquina central ([paso 5](#5-apuntar-al-backend-importante)).
-
-> El archivo `backend/.env` no viene en el repo (contiene secretos). Créalo a partir de
-> `backend/.env.example` antes del primer arranque.
+| Síntoma | Acción |
+|---------|--------|
+| Cabecera dice `fallback local` | La central no responde. Verifica que esté arriba (`./monitor.sh status`) y la URL `NEUSI_MONITOR_URL`. |
+| `docker: command not found` (Ruta A) | Instala Docker ([paso A.1](#a1--instalar-docker)). |
+| El backend no levanta / error de `.env` | ¿Creaste `backend/.env` y añadiste `REGISTER_TOKEN`? ([paso A.2](#a2--crear-el-archivo-de-configuración-backendenv)). |
+| `ssh`/`scp` no se reconoce (Windows) | Instala OpenSSH ([paso B.1](#b1--instalar-el-cliente-ssh)). |
+| `.\neusi.ps1` bloqueado por política | Usa `powershell -ExecutionPolicy Bypass -File .\neusi.ps1`. |
+| `Permission denied (publickey)` al conectar | Tu llave no está en `.ssh/id_ed25519` o no está autorizada en el nodo. |
+| Un nodo sale OFFLINE pero está encendido | Su puerto ngrok rotó → opción 8, o `neusi-refresh <code> <host> <port>`. |
 
 ---
 
-## 8. Solución de problemas
-
-| Síntoma | Causa probable / acción |
-|---------|-------------------------|
-| Cabecera dice `fallback local` | El menú no alcanza el backend. Revisa `NEUSI_MONITOR_URL` y que el backend esté arriba ([paso 5](#5-apuntar-al-backend-importante)). |
-| `ssh.exe`/`scp.exe` no se reconoce (Windows) | Falta el cliente OpenSSH: `Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0`. |
-| `.\neusi.ps1` no se ejecuta por política | Usa `powershell -ExecutionPolicy Bypass -File .\neusi.ps1` o `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`. |
-| `Permission denied (publickey)` al conectar | Tu llave no está en `~/.ssh/id_ed25519` o no está autorizada en el nodo. |
-| Un nodo sale OFFLINE pero está encendido | El puerto ngrok rotó. Refresca con la opción 8 o `neusi-refresh <code> <host> <port>`. |
-| `neusi-refresh` falla con "No encontre REGISTER_TOKEN" | Define `REGISTER_TOKEN` (ver nota del [paso 6](#6-el-menú-paso-a-paso)) o créalo en `backend/.env`. |
-
----
-
-¿Dudas sobre el detalle interno del CLI? Mira [`cli/README.md`](cli/README.md).
-Documentación técnica del monitor/stack: [`README.md`](README.md).
+Detalle interno del CLI: [`cli/README.md`](cli/README.md) · Documentación técnica del
+backend/stack: [`README.md`](README.md).
