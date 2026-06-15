@@ -177,6 +177,16 @@ Si no lo sabes, sáltalo: arrancará en modo `fallback local`.
 powershell -ExecutionPolicy Bypass -File .\neusi.ps1
 ```
 
+> **Atajo recomendado (un solo paso):** en vez de los pasos B.4 + B.5, ejecuta el
+> lanzador `neusi-cliente.cmd` (incluido en `cli\`). Ya trae configurada la URL de la
+> central y abre el menú directo. Puedes hacerle **doble clic** o, desde CMD:
+> ```cmd
+> cd %USERPROFILE%\neusi-orquestador\cli
+> neusi-cliente.cmd
+> ```
+> Si la laptop-central cambia de IP, pásala como argumento: `neusi-cliente.cmd 192.168.10.25`.
+> Para editar la IP por defecto, abre `neusi-cliente.cmd` y cambia la línea `set "CENTRAL=..."`.
+
 > **¿Abriste CMD en vez de PowerShell?** Funciona igual; desde CMD el paso 4 es
 > `set NEUSI_MONITOR_URL=http://IP:8070` y el arranque es exactamente el mismo comando
 > `powershell -ExecutionPolicy Bypass -File neusi.ps1`.
