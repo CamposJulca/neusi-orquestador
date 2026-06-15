@@ -1,0 +1,40 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: sqlite:////app/database/neusi_infra_monitor.db
+      LOG_DIR: /app/logs
+      SSH_PRIVATE_KEY_PATH: /root/.ssh/id_ed25519
+    volumes:
+      - ./backend/database:/app/database
+      - ./backend/logs:/app/logs
+      - ${HOME}/.ssh:/root/.ssh:ro
+      - ./resolv.conf:/etc/resolv.conf:ro
+    network_mode: host
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8070/docs >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: /api
+    network_mode: host
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/ >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped

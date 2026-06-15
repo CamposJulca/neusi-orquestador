@@ -1,0 +1,332 @@
+#!/usr/bin/env bash
+#
+# neusi — NEUSI OPERATIONS CLI  (unificado con Neusi Infra Monitor)
+#
+# Parte del proyecto neusi-infra-monitor. Usa el MISMO backend que el dashboard
+# web como fuente de verdad de host:puerto de cada nodo:
+#   - Menu SSH y estado: leen GET /api/servers del backend del monitor.
+#   - Refrescar puertos:  delega en `neusi-refresh` (auto: produccion + pruebas).
+#   - Dashboard web:      abre el frontend del monitor.
+# Si el backend no responde, el menu usa el fallback local de abajo.
+#
+# Config (variables de entorno):
+#   NEUSI_MONITOR_URL    backend del monitor   (default http://localhost:8070)
+#   NEUSI_DASHBOARD_URL  frontend del monitor  (default http://localhost:8080)
+
+BLUE="\e[34m"; GREEN="\e[32m"; RED="\e[31m"; YELLOW="\e[33m"; CYAN="\e[36m"; RESET="\e[0m"
+
+MONITOR_URL="${NEUSI_MONITOR_URL:-http://localhost:8070}"
+DASHBOARD_URL="${NEUSI_DASHBOARD_URL:-http://localhost:8080}"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+declare -A EP        # username -> "host puerto"
+SOURCE=""
+
+set_fallback() {
+    EP[produccion]="4.tcp.ngrok.io 12385"
+    EP[desarrollo]="8.tcp.ngrok.io 21457"
+    EP[pruebas]="8.tcp.ngrok.io 17803"
+    EP[simulador1]="6.tcp.ngrok.io 28249"
+    EP[camposjulca]="4.tcp.ngrok.io 29531"
+    EP[cristhiamdaniel]="8.tcp.ngrok.io 27504"
+}
+
+load_servers() {
+    set_fallback
+    SOURCE="${YELLOW}fallback local (backend no disponible)${RESET}"
+    local json parsed
+    json=$(curl -fsS --max-time 4 "$MONITOR_URL/api/servers" 2>/dev/null) || return 0
+    parsed=$(printf '%s' "$json" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+for s in data:
+    u = s.get('ssh_username') or ''
+    h = s.get('host') or ''
+    p = s.get('ssh_port') or ''
+    if u and h and p:
+        print(f'{u}\t{h}\t{p}')
+" 2>/dev/null) || return 0
+    [ -z "$parsed" ] && return 0
+    while IFS=$'\t' read -r u h p; do
+        [ -n "$u" ] && EP[$u]="$h $p"
+    done <<< "$parsed"
+    SOURCE="${GREEN}backend en vivo ($MONITOR_URL)${RESET}"
+}
+
+ep_host() { echo "${EP[$1]%% *}"; }
+ep_port() { echo "${EP[$1]##* }"; }
+
+connect_ssh() {
+    local NAME="$1" USER="$2"
+    local HOST PORT
+    HOST="$(ep_host "$USER")"; PORT="$(ep_port "$USER")"
+    clear
+    echo -e "${BLUE}=================================${RESET}"
+    echo -e "${BLUE}     CONECTANDO A $NAME${RESET}"
+    echo -e "${BLUE}=================================${RESET}"
+    echo ""
+    echo -e "${CYAN}Usuario:${RESET} $USER"
+    echo -e "${CYAN}Host:${RESET} $HOST"
+    echo -e "${CYAN}Puerto:${RESET} $PORT"
+    echo ""
+    if [ -z "$HOST" ] || [ -z "$PORT" ]; then
+        echo -e "${RED}No hay endpoint para '$USER' (ni en backend ni en fallback).${RESET}"
+    else
+        ssh "$USER@$HOST" -p "$PORT"
+    fi
+    echo ""
+    echo -e "${YELLOW}Conexion cerrada. Presiona ENTER para volver al menu.${RESET}"
+    read -r
+}
+
+check_host() {
+    local NAME="$1" USER="$2" ROLE="$3"
+    local HOST PORT STATUS
+    HOST="$(ep_host "$USER")"; PORT="$(ep_port "$USER")"
+    if [ -n "$HOST" ] && [ -n "$PORT" ] && \
+       timeout 3 bash -c "cat < /dev/null > /dev/tcp/$HOST/$PORT" 2>/dev/null; then
+        STATUS="${GREEN}ONLINE${RESET}"
+    else
+        STATUS="${RED}OFFLINE${RESET}"
+    fi
+    printf "%-8s %-18s %-22s %-20b %-16s\n" "$NAME" "$USER" "$HOST:$PORT" "$STATUS" "$ROLE"
+}
+
+show_infra() {
+    load_servers
+    clear
+    echo -e "${BLUE}============================================================${RESET}"
+    echo -e "${BLUE}                 NEUSI INFRAESTRUCTURA${RESET}"
+    echo -e "${BLUE}============================================================${RESET}"
+    echo -e "Fuente de endpoints: $SOURCE"
+    echo ""
+    printf "%-8s %-18s %-22s %-20s %-16s\n" "MAQ" "USUARIO" "ENDPOINT" "ESTADO" "ROL"
+    echo "------------------------------------------------------------------------------------------------"
+    check_host "10"  "produccion"      "Produccion"
+    check_host "12"  "desarrollo"      "Desarrollo"
+    check_host "11"  "pruebas"         "Testing"
+    check_host "13"  "simulador1"      "Simulador"
+    check_host "14"  "camposjulca"     "Nodo auxiliar"
+    check_host "105" "cristhiamdaniel" "Nodo auxiliar"
+    echo ""
+    echo -e "${YELLOW}Presiona ENTER para volver al menu.${RESET}"
+    read -r
+}
+
+# Refresca el backend (auto: principales desde produccion, auxiliares desde
+# pruebas) usando el comando hermano del repo.
+do_refresh() {
+    clear
+    echo -e "${BLUE}============================================================${RESET}"
+    echo -e "${BLUE}        REFRESCAR PUERTOS NGROK -> BACKEND${RESET}"
+    echo -e "${BLUE}============================================================${RESET}"
+    echo ""
+    local refresh_cmd=""
+    if [ -x "$SELF_DIR/neusi-refresh" ]; then
+        refresh_cmd="$SELF_DIR/neusi-refresh"
+    elif command -v neusi-refresh >/dev/null 2>&1; then
+        refresh_cmd="neusi-refresh"
+    fi
+    if [ -z "$refresh_cmd" ]; then
+        echo -e "${RED}No encontre 'neusi-refresh'.${RESET}"
+    else
+        "$refresh_cmd"
+    fi
+    echo ""
+    echo -e "${YELLOW}Presiona ENTER para volver al menu.${RESET}"
+    read -r
+}
+
+# Sube un archivo local a una maquina via scp, reutilizando host:puerto del backend.
+upload_file() {
+    load_servers
+    clear
+    echo -e "${BLUE}============================================================${RESET}"
+    echo -e "${BLUE}                 SUBIR ARCHIVO A UNA MAQUINA${RESET}"
+    echo -e "${BLUE}============================================================${RESET}"
+    echo ""
+    echo "Elige la maquina de destino:"
+    echo "1. Maquina 10  - Produccion      (produccion)"
+    echo "2. Maquina 12  - Desarrollo      (desarrollo)"
+    echo "3. Maquina 11  - Testing         (pruebas)"
+    echo "4. Maquina 13  - Simulador       (simulador1)"
+    echo "5. Maquina 14  - Nodo auxiliar   (camposjulca)"
+    echo "6. Maquina 105 - Nodo auxiliar   (cristhiamdaniel)"
+    echo "0. Cancelar"
+    echo ""
+    read -rp "Maquina destino: " M
+
+    local USER NAME
+    case "$M" in
+        1) NAME="Maquina 10";  USER="produccion" ;;
+        2) NAME="Maquina 12";  USER="desarrollo" ;;
+        3) NAME="Maquina 11";  USER="pruebas" ;;
+        4) NAME="Maquina 13";  USER="simulador1" ;;
+        5) NAME="Maquina 14";  USER="camposjulca" ;;
+        6) NAME="Maquina 105"; USER="cristhiamdaniel" ;;
+        0) return ;;
+        *) echo -e "${RED}Opcion invalida.${RESET}"; sleep 1; return ;;
+    esac
+
+    local HOST PORT
+    HOST="$(ep_host "$USER")"; PORT="$(ep_port "$USER")"
+    if [ -z "$HOST" ] || [ -z "$PORT" ]; then
+        echo -e "${RED}No hay endpoint para '$USER' (ni en backend ni en fallback).${RESET}"
+        echo ""
+        echo -e "${YELLOW}Presiona ENTER para volver al menu.${RESET}"; read -r
+        return
+    fi
+
+    echo ""
+    read -rep "Ruta de origen (archivo local): " SRC
+    # Expande ~ y elimina comillas accidentales
+    SRC="${SRC%\"}"; SRC="${SRC#\"}"; SRC="${SRC/#\~/$HOME}"
+    if [ ! -e "$SRC" ]; then
+        echo -e "${RED}No existe el archivo/carpeta de origen: $SRC${RESET}"
+        echo ""
+        echo -e "${YELLOW}Presiona ENTER para volver al menu.${RESET}"; read -r
+        return
+    fi
+
+    read -rp "Ruta de destino en $NAME (ej: /home/$USER/ ): " DST
+    [ -z "$DST" ] && DST="."
+
+    # Carpeta -> recursivo
+    local SCP_FLAGS=(-P "$PORT")
+    [ -d "$SRC" ] && SCP_FLAGS+=(-r)
+
+    echo ""
+    echo -e "${CYAN}Origen:${RESET}  $SRC"
+    echo -e "${CYAN}Destino:${RESET} $USER@$HOST:$DST  (puerto $PORT)"
+    echo ""
+    echo -e "${YELLOW}Subiendo...${RESET}"
+    if scp "${SCP_FLAGS[@]}" "$SRC" "$USER@$HOST:$DST"; then
+        echo -e "${GREEN}Archivo subido correctamente.${RESET}"
+    else
+        echo -e "${RED}Fallo la subida del archivo.${RESET}"
+    fi
+    echo ""
+    echo -e "${YELLOW}Presiona ENTER para volver al menu.${RESET}"; read -r
+}
+
+# Descarga un archivo de una maquina via scp, reutilizando host:puerto del backend.
+download_file() {
+    load_servers
+    clear
+    echo -e "${BLUE}============================================================${RESET}"
+    echo -e "${BLUE}              DESCARGAR ARCHIVO DE UNA MAQUINA${RESET}"
+    echo -e "${BLUE}============================================================${RESET}"
+    echo ""
+    echo "Elige la maquina de origen:"
+    echo "1. Maquina 10  - Produccion      (produccion)"
+    echo "2. Maquina 12  - Desarrollo      (desarrollo)"
+    echo "3. Maquina 11  - Testing         (pruebas)"
+    echo "4. Maquina 13  - Simulador       (simulador1)"
+    echo "5. Maquina 14  - Nodo auxiliar   (camposjulca)"
+    echo "6. Maquina 105 - Nodo auxiliar   (cristhiamdaniel)"
+    echo "0. Cancelar"
+    echo ""
+    read -rp "Maquina origen: " M
+
+    local USER NAME
+    case "$M" in
+        1) NAME="Maquina 10";  USER="produccion" ;;
+        2) NAME="Maquina 12";  USER="desarrollo" ;;
+        3) NAME="Maquina 11";  USER="pruebas" ;;
+        4) NAME="Maquina 13";  USER="simulador1" ;;
+        5) NAME="Maquina 14";  USER="camposjulca" ;;
+        6) NAME="Maquina 105"; USER="cristhiamdaniel" ;;
+        0) return ;;
+        *) echo -e "${RED}Opcion invalida.${RESET}"; sleep 1; return ;;
+    esac
+
+    local HOST PORT
+    HOST="$(ep_host "$USER")"; PORT="$(ep_port "$USER")"
+    if [ -z "$HOST" ] || [ -z "$PORT" ]; then
+        echo -e "${RED}No hay endpoint para '$USER' (ni en backend ni en fallback).${RESET}"
+        echo ""
+        echo -e "${YELLOW}Presiona ENTER para volver al menu.${RESET}"; read -r
+        return
+    fi
+
+    echo ""
+    read -rp "Ruta de origen en $NAME (archivo remoto): " SRC
+    if [ -z "$SRC" ]; then
+        echo -e "${RED}Debes indicar la ruta del archivo remoto.${RESET}"
+        echo ""
+        echo -e "${YELLOW}Presiona ENTER para volver al menu.${RESET}"; read -r
+        return
+    fi
+
+    read -rep "Ruta de destino local (carpeta, ej: ~/Descargas/ ): " DST
+    # Expande ~ y elimina comillas accidentales
+    DST="${DST%\"}"; DST="${DST#\"}"; DST="${DST/#\~/$HOME}"
+    [ -z "$DST" ] && DST="."
+
+    echo ""
+    echo -e "${CYAN}Origen:${RESET}  $USER@$HOST:$SRC  (puerto $PORT)"
+    echo -e "${CYAN}Destino:${RESET} $DST"
+    echo ""
+    echo -e "${YELLOW}Descargando...${RESET}"
+    if scp -r -P "$PORT" "$USER@$HOST:$SRC" "$DST"; then
+        echo -e "${GREEN}Archivo descargado correctamente.${RESET}"
+    else
+        echo -e "${RED}Fallo la descarga del archivo.${RESET}"
+    fi
+    echo ""
+    echo -e "${YELLOW}Presiona ENTER para volver al menu.${RESET}"; read -r
+}
+
+open_dashboard() {
+    clear
+    echo -e "${CYAN}Abriendo dashboard web: $DASHBOARD_URL${RESET}"
+    if command -v xdg-open >/dev/null 2>&1; then
+        xdg-open "$DASHBOARD_URL" >/dev/null 2>&1 &
+    else
+        echo -e "${YELLOW}Abrelo manualmente en tu navegador:${RESET} $DASHBOARD_URL"
+    fi
+    sleep 1
+}
+
+while true; do
+    load_servers
+    clear
+    echo -e "${BLUE}============================================================${RESET}"
+    echo -e "${BLUE}                    NEUSI OPERATIONS CLI${RESET}"
+    echo -e "${BLUE}============================================================${RESET}"
+    echo -e "Endpoints: $SOURCE"
+    echo ""
+    echo "1. Maquina 10  - Produccion      (produccion)"
+    echo "2. Maquina 12  - Desarrollo      (desarrollo)"
+    echo "3. Maquina 11  - Testing         (pruebas)"
+    echo "4. Maquina 13  - Simulador       (simulador1)"
+    echo "5. Maquina 14  - Nodo auxiliar   (camposjulca)"
+    echo "6. Maquina 105 - Nodo auxiliar   (cristhiamdaniel)"
+    echo "7. Ver infraestructura"
+    echo "8. Refrescar puertos (auto: produccion + auxiliares desde pruebas)"
+    echo "9. Abrir dashboard web"
+    echo "10. Subir archivo a una maquina"
+    echo "11. Descargar archivo de una maquina"
+    echo "0. Salir"
+    echo ""
+    read -rp "Seleccione una opcion: " OPTION
+
+    case "$OPTION" in
+        1) connect_ssh "Maquina 10"  "produccion" ;;
+        2) connect_ssh "Maquina 12"  "desarrollo" ;;
+        3) connect_ssh "Maquina 11"  "pruebas" ;;
+        4) connect_ssh "Maquina 13"  "simulador1" ;;
+        5) connect_ssh "Maquina 14"  "camposjulca" ;;
+        6) connect_ssh "Maquina 105" "cristhiamdaniel" ;;
+        7) show_infra ;;
+        8) do_refresh ;;
+        9) open_dashboard ;;
+        10) upload_file ;;
+        11) download_file ;;
+        0) clear; exit 0 ;;
+        *) echo -e "${RED}Opcion invalida.${RESET}"; sleep 1 ;;
+    esac
+done

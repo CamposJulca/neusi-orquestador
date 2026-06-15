@@ -1,0 +1,36 @@
+# === Secretos / entorno ===
+.env
+backend/.env
+*.env.local
+
+# === Python ===
+.venv/
+backend/.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# === Node / frontend ===
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+.vite/
+
+# === Bases de datos ===
+*.db
+*.sqlite
+*.sqlite3
+backend/database/
+
+# === Logs y temporales ===
+*.log
+*.tmp
+.DS_Store
+
+# === Llaves SSH (por si acaso) ===
+id_rsa*
+id_ed25519*
+*.pem
+*.key

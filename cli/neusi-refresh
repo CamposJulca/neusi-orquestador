@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+#
+# neusi-refresh — actualiza en el backend del monitor los puertos ngrok actuales,
+# de donde luego los lee el menu `neusi`. NO requiere agentes en los nodos.
+#
+# Modo AUTO (sin argumentos):
+#   1) Entra a produccion por SSH (llave, via ngrok), lee su API local de ngrok
+#      (127.0.0.1:4040) y actualiza los servidores que ese ngrok expone:
+#      produccion (.10), desarrollo (.12) y pruebas (.11).
+#   2) Con el host/puerto de pruebas recien obtenido, entra por SSH a pruebas y
+#      lee su ngrok para actualizar los nodos auxiliares que salen de pruebas:
+#      simulador1 (.103), camposjulca (.104) y cristhiamdaniel (.105).
+#
+# Modo MANUAL (3 argumentos):
+#   neusi-refresh <code> <host> <port>
+#   Refresco puntual de cualquier nodo si rota fuera de las dos lecturas auto. Ej:
+#     neusi-refresh 103 6.tcp.ngrok.io 28249
+#
+# Config (variables de entorno con defaults):
+#   NEUSI_MONITOR_URL   backend del monitor   (default http://localhost:8070)
+#   NEUSI_ENV_FILE      .env con REGISTER_TOKEN (default ~/InfraNeusi/neusi-infra-monitor/backend/.env)
+#   PROD_SSH_USER/HOST/PORT  acceso SSH a produccion (defaults produccion@4.tcp.ngrok.io:12385)
+#   PRUEBAS_SSH_USER         usuario SSH de pruebas (default pruebas); host/puerto se
+#                            toman automaticamente de la lectura de produccion.
+
+set -uo pipefail
+
+MONITOR_URL="${NEUSI_MONITOR_URL:-http://localhost:8070}"
+ENV_FILE="${NEUSI_ENV_FILE:-$HOME/InfraNeusi/neusi-infra-monitor/backend/.env}"
+PROD_SSH_USER="${PROD_SSH_USER:-produccion}"
+PROD_SSH_HOST="${PROD_SSH_HOST:-4.tcp.ngrok.io}"
+PROD_SSH_PORT="${PROD_SSH_PORT:-12385}"
+PRUEBAS_SSH_USER="${PRUEBAS_SSH_USER:-pruebas}"
+
+GREEN="\e[32m"; RED="\e[31m"; YELLOW="\e[33m"; CYAN="\e[36m"; RESET="\e[0m"
+
+# El code del backend se resuelve por DOS vias (ver resolve_code):
+#  1) nombre del tunel "ssh-<code>"  (pruebas usa ssh-103/104/105 = el code)
+#  2) si no, por el ultimo octeto de la IP interna del addr -> IP2CODE
+# Octetos internos conocidos por LAN:
+#   produccion expone .10/.11/.12 (nombres descriptivos ssh-prod/test/dev)
+#   pruebas    expone .13/.14/.105 (nombres ssh-103/104/105)
+declare -A IP2CODE=( [10]=100 [12]=101 [11]=102 [13]=103 [14]=104 [105]=105 )
+# Etiqueta legible por code
+declare -A LABEL=( [100]=produccion [101]=desarrollo [102]=pruebas \
+                   [103]=simulador1 [104]=camposjulca [105]=cristhiamdaniel )
+# Codes que esperamos que salgan de pruebas (nodos auxiliares)
+AUX_CODES=(103 104 105)
+
+# Parser comun: del JSON de /api/tunnels saca "name<TAB>octeto<TAB>host<TAB>puerto"
+# por cada tunel tcp cuyo addr interno termina en .OCTETO:22
+PARSE_TUNNELS='
+import sys, json, re
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for t in d.get("tunnels", []):
+    if t.get("proto") != "tcp":
+        continue
+    addr = t.get("config", {}).get("addr", "")
+    m = re.search(r"(\d+):22$", addr)            # addr interno termina en .OCTETO:22
+    u = re.match(r"tcp://([^:]+):(\d+)", t.get("public_url", ""))
+    if m and u:
+        name = t.get("name", "")
+        print(name + "\t" + m.group(1) + "\t" + u.group(1) + "\t" + u.group(2))
+'
+
+# Resuelve el code: primero por nombre ssh-<code>, luego por octeto.
+# $1 name  $2 octeto. Imprime el code o nada.
+resolve_code() {
+  local name="$1" octet="$2"
+  if [[ "$name" =~ ^ssh-([0-9]+)$ ]] && [ -n "${LABEL[${BASH_REMATCH[1]}]:-}" ]; then
+    echo "${BASH_REMATCH[1]}"
+  else
+    echo "${IP2CODE[$octet]:-}"
+  fi
+}
+
+if [ -z "${REGISTER_TOKEN:-}" ]; then
+  REGISTER_TOKEN=$(grep -E '^REGISTER_TOKEN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)
+fi
+if [ -z "${REGISTER_TOKEN:-}" ]; then
+  echo -e "${RED}No encontre REGISTER_TOKEN (revisa $ENV_FILE o exporta REGISTER_TOKEN).${RESET}" >&2
+  exit 1
+fi
+
+register() {
+  local code="$1" host="$2" port="$3" resp http
+  resp=$(curl -fsS --max-time 8 -X POST "$MONITOR_URL/api/servers/register" \
+    -H "Content-Type: application/json" \
+    -H "X-Register-Token: $REGISTER_TOKEN" \
+    -d "{\"code\":\"$code\",\"host\":\"$host\",\"ssh_port\":$port}" \
+    -w $'\n%{http_code}' 2>/dev/null)
+  http="${resp##*$'\n'}"
+  if [ "$http" = "200" ]; then
+    printf "  ${GREEN}OK${RESET}   %-16s code=%-4s -> %s:%s\n" "${LABEL[$code]:-?}" "$code" "$host" "$port"
+    return 0
+  fi
+  printf "  ${RED}FALLO${RESET} %-16s code=%-4s (HTTP %s)\n" "${LABEL[$code]:-?}" "$code" "${http:-?}"
+  return 1
+}
+
+# Lee la API de ngrok de un nodo por SSH y devuelve filas
+# "name<TAB>octeto<TAB>host<TAB>puerto". $1 user $2 host $3 port.
+# Sale 1 (sin imprimir) si no pudo leer.
+fetch_rows() {
+  local u="$1" h="$2" p="$3" json
+  json=$(ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+          -p "$p" "$u@$h" \
+          'curl -s --max-time 5 http://127.0.0.1:4040/api/tunnels' 2>/dev/null)
+  [ -z "$json" ] && return 1
+  printf '%s' "$json" | python3 -c "$PARSE_TUNNELS"
+}
+
+# ---------- Modo MANUAL ----------
+if [ "$#" -eq 3 ]; then
+  echo -e "${CYAN}Refresco manual:${RESET}"
+  register "$1" "$2" "$3"
+  exit $?
+elif [ "$#" -ne 0 ]; then
+  echo "Uso: $0                      (auto: principales desde produccion + auxiliares desde pruebas)" >&2
+  echo "     $0 <code> <host> <port> (manual: un nodo puntual)" >&2
+  exit 1
+fi
+
+rc=0
+declare -A DONE=()                 # code -> 1 (ya registrado en alguna pasada)
+PRUEBAS_HOST=""; PRUEBAS_PORT=""   # endpoint de pruebas descubierto desde produccion
+
+# ---------- AUTO: pasada 1, principales desde produccion ----------
+echo -e "${CYAN}Leyendo ngrok de produccion ($PROD_SSH_USER@$PROD_SSH_HOST:$PROD_SSH_PORT)...${RESET}"
+mapfile -t ROWS < <(fetch_rows "$PROD_SSH_USER" "$PROD_SSH_HOST" "$PROD_SSH_PORT")
+
+if [ "${#ROWS[@]}" -eq 0 ]; then
+  echo -e "${RED}No pude leer la API de ngrok en produccion (¿SSH por llave OK? ¿ngrok corriendo?).${RESET}" >&2
+  exit 1
+fi
+
+echo -e "${CYAN}Actualizando backend ($MONITOR_URL):${RESET}"
+while IFS=$'\t' read -r name octet host port; do
+  [ -z "$host" ] && continue
+  code="$(resolve_code "$name" "$octet")"
+  if [ -z "$code" ]; then
+    printf "  ${YELLOW}SKIP${RESET} tunel '%s' (.%s) no mapeado a ningun code\n" "$name" "$octet"
+    continue
+  fi
+  register "$code" "$host" "$port" && DONE[$code]=1 || rc=1
+  if [ "$code" = "102" ]; then     # pruebas: guarda su endpoint para la pasada 2
+    PRUEBAS_HOST="$host"; PRUEBAS_PORT="$port"
+  fi
+done < <(printf '%s\n' "${ROWS[@]}")
+
+# ---------- AUTO: pasada 2, auxiliares desde pruebas ----------
+echo ""
+if [ -z "$PRUEBAS_HOST" ] || [ -z "$PRUEBAS_PORT" ]; then
+  echo -e "${YELLOW}produccion no expuso el tunel de pruebas (.11): no puedo alcanzar pruebas.${RESET}"
+  echo -e "${YELLOW}Refresca los auxiliares a mano si rotan:${RESET}"
+  echo "  neusi-refresh 103 <host> <port>   # simulador1"
+  echo "  neusi-refresh 104 <host> <port>   # camposjulca"
+  echo "  neusi-refresh 105 <host> <port>   # cristhiamdaniel"
+  exit $rc
+fi
+
+echo -e "${CYAN}Leyendo ngrok de pruebas ($PRUEBAS_SSH_USER@$PRUEBAS_HOST:$PRUEBAS_PORT)...${RESET}"
+mapfile -t AUX_ROWS < <(fetch_rows "$PRUEBAS_SSH_USER" "$PRUEBAS_HOST" "$PRUEBAS_PORT")
+
+if [ "${#AUX_ROWS[@]}" -eq 0 ]; then
+  echo -e "${RED}No pude leer la API de ngrok en pruebas (¿SSH por llave OK? ¿ngrok corriendo?).${RESET}"
+  echo -e "${YELLOW}Refresca los auxiliares a mano si rotan:${RESET}"
+  echo "  neusi-refresh 103 <host> <port>   # simulador1"
+  echo "  neusi-refresh 104 <host> <port>   # camposjulca"
+  echo "  neusi-refresh 105 <host> <port>   # cristhiamdaniel"
+  exit 1
+fi
+
+echo -e "${CYAN}Actualizando nodos auxiliares ($MONITOR_URL):${RESET}"
+while IFS=$'\t' read -r name octet host port; do
+  [ -z "$host" ] && continue
+  code="$(resolve_code "$name" "$octet")"
+  [ -z "$code" ] && continue                  # ignora cualquier otro tunel de pruebas
+  [ -n "${DONE[$code]:-}" ] && continue        # ya lo registramos desde produccion
+  register "$code" "$host" "$port" && DONE[$code]=1 || rc=1
+done < <(printf '%s\n' "${AUX_ROWS[@]}")
+
+# Avisa de auxiliares que esperabamos de pruebas pero no aparecieron
+missing=()
+for code in "${AUX_CODES[@]}"; do
+  [ -z "${DONE[$code]:-}" ] && missing+=("$code")
+done
+if [ "${#missing[@]}" -gt 0 ]; then
+  echo ""
+  echo -e "${YELLOW}Auxiliares sin tunel en pruebas (refrescalos a mano si deberian estar):${RESET}"
+  for code in "${missing[@]}"; do
+    printf "  neusi-refresh %s <host> <port>   # %s\n" "$code" "${LABEL[$code]:-?}"
+  done
+fi
+
+exit $rc
