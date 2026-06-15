@@ -2,6 +2,8 @@
 
 Aplicativo web local para visualizar el estado operativo de las maquinas 100 a 105 en una sola pantalla.
 
+> 🚀 **¿Primera vez? Empieza por la [Guía de inicio paso a paso (Windows / Linux)](GUIA-INICIO.md).**
+
 ## CLI de operaciones (`neusi`)
 
 El proyecto incluye un CLI de terminal (`cli/neusi`) **unificado con el monitor**: usa el
